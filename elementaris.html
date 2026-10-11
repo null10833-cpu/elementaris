@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#0b1020">
+<title>Стихийные колонны</title>
+<style>
+html,body{margin:0;height:100%;background:#0b1020;color:#e8ecf5;font-family:system-ui,sans-serif;-webkit-user-select:none;user-select:none}
+#wrap{display:flex;flex-direction:column;align-items:center;min-height:100%}
+#hud{display:flex;gap:14px;font-size:14px;padding:6px 2px}
+#hud b{color:#ffd166}
+#msg{min-height:18px;font-size:13px;color:#9fb3d9;padding:0 2px;text-align:center}
+#game{background:#0d1526;border:2px solid #2a3a5f;border-radius:8px;touch-action:none;display:block}
+#elems{display:flex;gap:6px;margin:8px 0 4px;width:min(92vw,360px)}
+.ebtn{flex:1;border-radius:10px;border:2px solid #333;background:#16203a;color:#fff;padding:6px 2px;font-size:13px;cursor:pointer}
+.ebtn .ic{font-size:18px}
+.ebtn .nm{font-size:11px}
+.ebar{height:5px;background:#0b1020;border-radius:3px;margin-top:4px;overflow:hidden}
+.ebar div{height:100%;width:100%}
+.ebtn.off{opacity:.35}
+.ebtn.shake{animation:sh .3s}
+@keyframes sh{25%{transform:translateX(-3px)}75%{transform:translateX(3px)}}
+#ctrl{display:flex;gap:8px;margin:4px 0 12px}
+.cbtn{width:54px;height:46px;font-size:20px;border-radius:10px;border:2px solid #333;background:#16203a;color:#fff;cursor:pointer}
+#overlay{position:fixed;inset:0;background:rgba(5,8,18,.9);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;text-align:center;padding:24px}
+#overlay button{padding:10px 24px;font-size:16px;border-radius:10px;border:2px solid #4a5f92;background:#1a2c55;color:#fff;cursor:pointer}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="hud"><span>Счёт: <b id="score">0</b></span><span>Линии: <b id="lines">0</b></span><span>Уровень: <b id="level">1</b></span></div>
+  <div id="msg"></div>
+  <canvas id="game"></canvas>
+  <div id="elems"></div>
+  <div id="ctrl">
+    <button class="cbtn" id="bL">◀</button>
+    <button class="cbtn" id="bRot">⟳</button>
+    <button class="cbtn" id="bR">▶</button>
+    <button class="cbtn" id="bD">⬇</button>
+    <button class="cbtn" id="bDrop">⤓</button>
+    <button class="cbtn" id="bP">⏸</button>
+  </div>
+</div>
+<div id="overlay">
+  <div id="ovText"><h2 style="margin:0">Стихийные колонны</h2>
+  <p style="max-width:340px">Зарядите фигуру стихией до падения — у каждой своя超级способность:<br>
+  🔥 выжигает столбец • 💧 растекается по строке<br>💨 сдувает крестом • 🪨 трамбует рельеф<br><br>
+  Смешивайте стихии в одной линии — получите комбо. Следите за энергией: стихия, на которую потрачено всё, временно недоступна.</p></div>
+  <button id="bRestart">Начать игру</button>
+</div>
+<script>
+"use strict";
+const COLS=10,ROWS=20,CELL=30,COST=8,GAIN=6;
+const ICON={F:'🔥',W:'💧',A:'💨',E:'🪨'};
+const NAME={F:'Огонь',W:'Вода',A:'Воздух',E:'Земля'};
+const COLR={F:'#ff5a3c',W:'#3aa8ff',A:'#cfeaff',E:'#b0813f'};
+const SIG={F:['S','Z','T'],W:['J','L','S'],A:['I','T'],E:['O','L']};
+const SHAPES={
+ I:{size:4,cells:[[0,1],[1,1],[2,1],[3,1]]},
+ O:{size:2,cells:[[0,0],[1,0],[0,1],[1,1]]},
+ T:{size:3,cells:[[0,1],[1,1],[2,1],[1,0]]},
+ S:{size:3,cells:[[1,0],[2,0],[0,1],[1,1]]},
+ Z:{size:3,cells:[[0,0],[1,0],[1,1],[2,1]]},
+ J:{size:3,cells:[[0,0],[0,1],[1,1],[2,1]]},
+ L:{size:3,cells:[[2,0],[0,1],[1,1],[2,1]]}};
+
+const canvas=document.getElementById('game');
+canvas.width=COLS*CELL;canvas.height=ROWS*CELL;
+const ctx=canvas.getContext('2d');
+const W=canvas.width,H=canvas.height;
+function el(id){return document.getElementById(id);}
+const msg=el('msg'),overlay=el('overlay'),ovText=el('ovText');
+
+let board,cur,nextType,energy,score,lines,level,paused,mudNext,bag;
+let state='menu';
+let fallTimer=null,chooseTimer=null,choiceLeft=0;
+
+function shuffle(a){for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));const t=a[i];a[i]=a[j];a[j]=t;}return a;}
+let bagArr=[];
+function nextShapeType(){
+  if(!bagArr.length){bagArr=['I','O','T','S','Z','J','L'];shuffle(bagArr);}
+  return bagArr.pop();
+}
+function cellsOf(t){return SHAPES[t].cells.map(c=>c.slice());}
+
+// --- кнопки стихий ---
+const elemsDiv=el('elems');const btnE={};
+['F','W','A','E'].forEach(e=>{
+  const b=document.createElement('button');
+  b.className='ebtn';b.id='e'+e;
+  b.innerHTML='<span class="ic">'+ICON[e]+'</span><div class="nm">'+NAME[e]+' <span id="en'+e+'"></span></div><div class="ebar"><div id="eb'+e+'" style="background:'+COLR[e]+'"></div></div>';
+  b.addEventListener('pointerdown',ev=>{ev.preventDefault();pick(e);});
+  elemsDiv.appendChild(b);btnE[e]=b;
+});
+
+// --- жизненный цикл ---
+function newGame(){
+  board=Array.from({length:ROWS},()=>new Array(COLS).fill(null));
+  energy={F:100,W:100,A:100,E:100};
+  score=0;lines=0;level=1;paused=false;mudNext=false;bagArr=[];
+  overlay.classList.add('hidden');
+  startChoose();
+}
+function startChoose(){
+  state='choose';cur=null;
+  nextType=nextShapeType();
+  choiceLeft=5;
+  clearInterval(fallTimer);clearInterval(chooseTimer);
+  chooseTimer=setInterval(()=>{choiceLeft--;if(choiceLeft<=0)autoPick();else updateHUD();},1000);
+  updateHUD();draw();
+}
+function autoPick(){
+  clearInterval(chooseTimer);
+  const order=['F','W','A','E'].sort((a,b)=>energy[b]-energy[a]);
+  beginFall(nextType,order[0]);
+}
+function pick(e){
+  if(state!=='choose')return;
+  if(energy[e]>=COST){
+    clearInterval(chooseTimer);
+    energy[e]-=COST;
+    beginFall(nextType,e);
+  }else{
+    btnE[e].classList.remove('shake');void btnE[e].offsetWidth;
+    btnE[e].classList.add('shake');
+  }
+}
+function beginFall(type,elem){
+  cur={type:type,elem:elem,cells:cellsOf(type),x:Math.floor((COLS-SHAPES[type].size)/2),y:-1};
+  state='fall';
+  scheduleFall();
+  draw();
+}
+function scheduleFall(){
+  clearInterval(fallTimer);
+  let iv=Math.max(90,700-(level-1)*60);
+  if(mudNext){iv*=2;mudNext=false;}
+  fallTimer=setInterval(tick,iv);
+}
+function gameOver(){
+  state='over';cur=null;
+  clearInterval(fallTimer);clearInterval(chooseTimer);
+  ovText.innerHTML='<h2 style="margin:0">Игра окончена!</h2><p>Счёт: '+score+'<br>Линий: '+lines+'<br>Уровень: '+level+'</p>';
+  el('bRestart').textContent='Играть снова';
+  overlay.classList.remove('hidden');
+}
+function togglePause(){
+  if(state!=='fall')return;
+  paused=!paused;
+  msg.textContent=paused?'Пауза — нажмите ⏸, чтобы продолжить':'';
+}
+
+// --- движение ---
+function collide(cells,x,y){
+  for(const c of cells){
+    const bx=x+c[0],by=y+c[1];
+    if(bx<0||bx>=COLS||by>=ROWS)return true;
+    if(by>=0&&board[by][bx])return true;
+  }
+  return false;
+}
+function move(dx){
+  if(state!=='fall'||paused)return;
+  if(!collide(cur.cells,cur.x+dx,cur.y)){cur.x+=dx;draw();}
+}
+function rotate(){
+  if(state!=='fall'||paused||cur.type==='O')return;
+  const n=SHAPES[cur.type].size;
+  const rc=cur.cells.map(c=>[n-1-c[1],c[0]]);
+  for(const dx of[0,-1,1,-2,2]){
+    if(!collide(rc,cur.x+dx,cur.y)){cur.cells=rc;cur.x+=dx;draw();return;}
+  }
+}
+function tick(){
+  if(state!=='fall'||paused)return;
+  if(!collide(cur.cells,cur.x,cur.y+1)){cur.y++;draw();}
+  else lockPiece();
+}
+function hardDrop(){
+  if(state!=='fall'||paused)return;
+  while(!collide(cur.cells,cur.x,cur.y+1))cur.y++;
+  lockPiece();
+}
+function lockPiece(){
+  let topOut=false;
+  for(const c of cur.cells){
+    const bx=cur.x+c[0],by=cur.y+c[1];
+    if(by<0){topOut=true;continue;}
+    board[by][bx]=cur.elem;
+  }
+  if(topOut){gameOver();return;}
+  processClears();
+  if(state!=='over')startChoose();
+}
+
+// --- эффекты стихий ---
+function applyGravity(){
+  for(let x=0;x<COLS;x++){
+    const col=[];
+    for(let y=ROWS-1;y>=0;y--)if(board[y][x])col.push(board[y][x]);
+    for(let y=0;y<ROWS;y++)board[y][x]=null;
+    for(let i=0;i<col.length;i++)board[ROWS-1-i][x]=col[i];
+  }
+}
+function fullRows(){
+  const r=[];
+  for(let y=0;y<ROWS;y++)if(board[y].every(v=>v))r.push(y);
+  return r;
+}
+function processClears(){
+  let totalRows=0,totalPts=0;
+  const gained={F:0,W:0,A:0,E:0};
+  const sigMult=(cur&&SIG[cur.elem]&&SIG[cur.elem].includes(cur.type))?1.3:1;
+  let rows=fullRows(),cycle=0;
+  while(rows.length&&cycle<8){
+    cycle++;
+    const counts={F:0,W:0,A:0,E:0};
+    const fC=[],wC=[],aC=[],eC=[];
+    rows.forEach(y=>{for(let x=0;x<COLS;x++){const e=board[y][x];
+      if(!e)return;counts[e]++;
+      if(e==='F')fC.push([x,y]);else if(e==='W')wC.push([x,y]);
+      else if(e==='A')aC.push([x,y]);else eC.push([x,y]);}});
+    const clear=new Set();
+    rows.forEach(y=>{for(let x=0;x<COLS;x++)clear.add(y+','+x);});
+    const sig=e=>(cur&&cur.elem===e&&SIG[e].includes(cur.type))?2:0;
+    // ОГОНЬ: столб вверх
+    fC.forEach(c=>{const r=Math.min(6,counts.F+sig('F'));let n=0;
+      for(let i=c[1]-1;i>=0&&n<r;i--){if(board[i][c[0]]){clear.add(i+','+c[0]);n++;}}});
+    // ВОДА: растекание по строке выше
+    wC.forEach(c=>{const r=Math.min(6,counts.W+sig('W'));let n=0;
+      for(let d=1;d<=6&&n<r;d++)for(const s of[-1,1]){const nx=c[0]+d*s;
+        if(nx<0||nx>=COLS)continue;
+        if(c[1]-1>=0&&board[c[1]-1][nx]){clear.add((c[1]-1)+','+nx);n++;}}});
+    // ВОЗДУХ: крест
+    aC.forEach(c=>{const r=Math.min(4,counts.A+sig('A'));
+      const dirs=[[0,-1],[0,1],[-1,0],[1,0]];
+      for(let i=0;i<r;i++){const nx=c[0]+dirs[i][0],ny=c[1]+dirs[i][1];
+        if(nx>=0&&nx<COLS&&ny>=0&&ny<ROWS&&board[ny][nx])clear.add(ny+','+nx);}});
+    // КОМБО
+    const present=['F','W','A','E'].filter(e=>counts[e]>0);
+    const has=(a,b)=>present.indexOf(a)>=0&&present.indexOf(b)>=0;
+    const occAbove=mY=>{const o=[];for(let y=0;y<mY;y++)for(let x=0;x<COLS;x++)
+      if(board[y][x]&&!clear.has(y+','+x))o.push([x,y]);return o;};
+    if(has('F','W')&&rows[0]>0){const y0=rows[0]-1;
+      for(let x=0;x<COLS;x++)if(board[y0][x])clear.add(y0+','+x);totalPts+=50;}
+    if(has('F','A')){fC.forEach(c=>{for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
+      const nx=c[0]+dx,ny=c[1]+dy;
+      if(nx>=0&&nx<COLS&&ny>=0&&ny<ROWS&&board[ny][nx])clear.add(ny+','+nx);}});totalPts+=50;}
+    if(has('W','A')){const occ=shuffle(occAbove(rows[0]));
+      occ.slice(0,4).forEach(c=>clear.add(c[1]+','+c[0]));totalPts+=50;}
+    if(has('W','E')){mudNext=true;totalPts+=30;}
+    if(has('F','E')){fC.forEach(c=>{for(let i=1;i<=3;i++)for(const s of[-1,1]){
+      const nx=c[0]+i*s,ny=c[1]-i;
+      if(nx>=0&&nx<COLS&&ny>=0&&board[ny][nx])clear.add(ny+','+nx);}});totalPts+=50;}
+    if(has('A','E')){const dir=Math.random()<0.5?-1:1;
+      for(let y=0;y<rows[0];y++){const row=board[y];
+        if(dir<0)row.push(row.shift());else row.unshift(row.pop());}totalPts+=30;}
+    const harmony=present.length>=3;
+    if(harmony){const occ=shuffle(occAbove(ROWS));
+      occ.slice(0,3).forEach(c=>clear.add(c[1]+','+c[0]));}
+    // удаление и энергия
+    clear.forEach(k=>{const p=k.split(',');const e=board[+p[0]][+p[1]];
+      if(e){gained[e]++;board[+p[0]][+p[1]]=null;}});
+    // схлопывание линий
+    rows.sort((a,b)=>a-b).forEach(y=>{board.splice(y,1);board.unshift(new Array(COLS).fill(null));});
+    if(counts.E>0)applyGravity();
+    totalPts+=[0,100,300,500,800][rows.length]*(harmony?2:1);
+    totalRows+=rows.length;
+    rows=fullRows();
+  }
+  for(const e in gained)energy[e]=Math.min(100,energy[e]+gained[e]*GAIN);
+  score+=Math.round(totalPts*level*sigMult);
+  lines+=totalRows;
+  level=1+Math.floor(lines/10);
+  updateHUD();
+}
+
+// --- отрисовка ---
+function cell(x,y,c){
+  ctx.fillStyle=c;
+  ctx.fillRect(x*CELL+1,y*CELL+1,CELL-2,CELL-2);
+  ctx.fillStyle='rgba(255,255,255,.18)';
+  ctx.fillRect(x*CELL+1,y*CELL+1,CELL-2,4);
+}
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  ctx.strokeStyle='rgba(80,110,170,.14)';
+  for(let x=1;x<COLS;x++){ctx.beginPath();ctx.moveTo(x*CELL,0);ctx.lineTo(x*CELL,H);ctx.stroke();}
+  for(let y=1;y<ROWS;y++){ctx.beginPath();ctx.moveTo(0,y*CELL);ctx.lineTo(W,y*CELL);ctx.stroke();}
+  for(let y=0;y<ROWS;y++)for(let x=0;x<COLS;x++)if(board[y][x])cell(x,y,COLR[board[y][x]]);
+  if(state==='fall'&&cur){
+    let gy=cur.y;
+    while(!collide(cur.cells,cur.x,gy+1))gy++;
+    cur.cells.forEach(c=>{const by=gy+c[1];
+      if(by>=0){ctx.globalAlpha=.16;cell(cur.x+c[0],by,COLR[cur.elem]);ctx.globalAlpha=1;}});
+    cur.cells.forEach(c=>{const by=cur.y+c[1];
+      if(by>=0)cell(cur.x+c[0],by,COLR[cur.elem]);});
+  }
+  if(state==='choose'&&nextType){
+    const n=SHAPES[nextType].size,off=Math.floor((COLS-n)/2);
+    SHAPES[nextType].cells.forEach(c=>{
+      ctx.globalAlpha=.25;cell(off+c[0],c[1]+2,'#8899bb');ctx.globalAlpha=1;});
+  }
+}
+function updateHUD(){
+  el('score').textContent=score;
+  el('lines').textContent=lines;
+  el('level').textContent=level;
+  ['F','W','A','E'].forEach(e=>{
+    el('en'+e).textContent=energy[e];
+    el('eb'+e).style.width=energy[e]+'%';
+    btnE[e].classList.toggle('off',state!=='choose'||energy[e]<COST);
+  });
+  if(state==='choose')msg.textContent='Выберите стихию! Авто через '+choiceLeft+' с';
+  else if(mudNext)msg.textContent='Грязь: следующая фигура упадёт медленно';
+  else if(!paused)msg.textContent='';
+}
+
+// --- управление ---
+function bindHold(id,fn,rep){
+  const b=el(id);let t=null;
+  const stop=()=>{if(t){clearInterval(t);t=null;}};
+  b.addEventListener('pointerdown',e=>{e.preventDefault();fn();if(rep)t=setInterval(fn,120);});
+  ['pointerup','pointerleave','pointercancel'].forEach(ev=>b.addEventListener(ev,stop));
+}
+bindHold('bL',()=>move(-1),true);
+bindHold('bR',()=>move(1),true);
+bindHold('bRot',rotate,false);
+bindHold('bD',()=>{if(state==='fall')tick();},true);
+bindHold('bDrop',hardDrop,false);
+el('bP').addEventListener('pointerdown',e=>{e.preventDefault();togglePause();});
+el('bRestart').addEventListener('click',()=>newGame());
+document.addEventListener('keydown',e=>{
+  if(['ArrowLeft','ArrowRight','ArrowDown','ArrowUp','Space'].indexOf(e.code)>=0)e.preventDefault();
+  if(e.code==='ArrowLeft')move(-1);
+  else if(e.code==='ArrowRight')move(1);
+  else if(e.code==='ArrowDown')tick();
+  else if(e.code==='ArrowUp')rotate();
+  else if(e.code==='Space')hardDrop();
+  else if(e.code==='KeyP')togglePause();
+});
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&state==='fall')paused=true;});
+function fit(){
+  const w=Math.max(200,Math.min(window.innerWidth*0.92,(window.innerHeight-270)/2));
+  canvas.style.width=w+'px';canvas.style.height=(w*2)+'px';
+}
+window.addEventListener('resize',fit);
+fit();
+draw();
+</script>
+</body>
+</html>
